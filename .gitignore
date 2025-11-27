@@ -1,0 +1,16 @@
+# Build artifacts
+.build/
+DerivedData/
+
+# SwiftPM/Xcode state
+.swiftpm/
+xcuserdata/
+*.xccheckout
+*.xcworkspace
+*.xcodeproj
+
+# macOS cruft
+.DS_Store
+
+# Local tooling/cache overrides
+.home/
