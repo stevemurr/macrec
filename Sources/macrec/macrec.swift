@@ -74,21 +74,26 @@ struct CLI {
             fputs("Warning: capturing full display audio because no windows for '\(targetApp.applicationName)' were found.\n", stderr)
         }
         let stream = SCStream(filter: filter, configuration: config, delegate: nil)
-        try await addOutput(writer, to: stream, queue: writer.queue)
+        try addOutput(writer, to: stream, queue: writer.queue)
 
-        print("Recording '\(targetApp.applicationName)' → \(outputURL.path)")
-        print("Press Ctrl+C to stop. If prompted, allow Screen Recording access.")
+        let status = RecordingStatus(appName: targetApp.applicationName, outputPath: outputURL.path)
+        status.start()
 
-        try await stream.startCapture()
-        waitForStopSignal()
-        try await stream.stopCapture()
-
-        writer.finish()
-        print("Recording stopped. Saved to \(outputURL.path)")
+        do {
+            try await stream.startCapture()
+            status.startTimer()
+            waitForStopSignal()
+            try await stream.stopCapture()
+            writer.finish()
+            status.finish()
+        } catch {
+            status.fail(error: error)
+            throw error
+        }
     }
 
-    private func addOutput(_ output: SCStreamOutput, to stream: SCStream, queue: DispatchQueue) async throws {
-        try await stream.addStreamOutput(output, type: .audio, sampleHandlerQueue: queue)
+    private func addOutput(_ output: SCStreamOutput, to stream: SCStream, queue: DispatchQueue) throws {
+        try stream.addStreamOutput(output, type: .audio, sampleHandlerQueue: queue)
     }
 
     private func matchApplication(_ name: String, in applications: [SCRunningApplication]) -> SCRunningApplication? {
@@ -140,6 +145,81 @@ struct CLI {
 private func describe(_ error: Error) -> String {
     let ns = error as NSError
     return "\(ns.localizedDescription) [\(ns.domain) \(ns.code)]"
+}
+
+final class RecordingStatus {
+    private let appName: String
+    private let outputPath: String
+    private var startDate: Date?
+    private var timer: DispatchSourceTimer?
+    private var lastLineLength = 0
+    private let queue = DispatchQueue(label: "macrec.status")
+
+    init(appName: String, outputPath: String) {
+        self.appName = appName
+        self.outputPath = outputPath
+    }
+
+    func start() {
+        print("▶︎ Recording \(appName)")
+        print("   Output: \(outputPath)")
+        print("   Press Ctrl+C to stop.")
+    }
+
+    func startTimer() {
+        startDate = Date()
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now(), repeating: 1)
+        timer.setEventHandler { [weak self] in
+            self?.tick()
+        }
+        timer.resume()
+        self.timer = timer
+    }
+
+    func finish() {
+        stopTimer()
+        moveToNewLine()
+        print("✅ Saved \(outputPath)")
+    }
+
+    func fail(error: Error) {
+        stopTimer()
+        moveToNewLine()
+        print("✖️ Recording failed: \(describe(error))")
+    }
+
+    private func tick() {
+        guard let start = startDate else { return }
+        let elapsed = Date().timeIntervalSince(start)
+        let line = "⏺  \(appName) — \(format(elapsed: elapsed)) elapsed"
+        let padded = line.padding(toLength: max(lastLineLength, line.count), withPad: " ", startingAt: 0)
+        fputs("\r\(padded)", stdout)
+        fflush(stdout)
+        lastLineLength = padded.count
+    }
+
+    private func stopTimer() {
+        timer?.setEventHandler {}
+        timer?.cancel()
+        timer = nil
+    }
+
+    private func moveToNewLine() {
+        fputs("\r", stdout)
+        fflush(stdout)
+    }
+
+    private func format(elapsed: TimeInterval) -> String {
+        let total = Int(elapsed)
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let seconds = total % 60
+        if hours > 0 {
+            return String(format: "%02d:%02d:%02d", hours, minutes, seconds)
+        }
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
 }
 
 enum CLIError: LocalizedError {
@@ -253,8 +333,12 @@ final class AudioFileWriter: NSObject, SCStreamOutput {
             throw NSError(domain: "macrec", code: -4, userInfo: [NSLocalizedDescriptionKey: "Unsupported audio format"])
         }
 
+        // Force interleaved output to avoid AVAudioFile warnings about non-interleaved buffers.
+        var settings = audioFormat.settings
+        settings[AVLinearPCMIsNonInterleaved] = false
+
         self.format = audioFormat
-        self.audioFile = try AVAudioFile(forWriting: outputURL, settings: audioFormat.settings)
+        self.audioFile = try AVAudioFile(forWriting: outputURL, settings: settings)
     }
 }
 
