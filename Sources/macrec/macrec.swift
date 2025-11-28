@@ -14,9 +14,8 @@ struct Macrec {
     }
 }
 
+@MainActor
 struct CLI {
-    private let recorder = AppRecorder()
-
     func run() async throws {
         switch Arguments.parse(from: Array(CommandLine.arguments.dropFirst())) {
         case .list:
@@ -29,11 +28,10 @@ struct CLI {
     }
 
     private func listApplications() async throws {
-        let apps = try await MainActor.run {
-            try await recorder.listApplications()
-                .map { $0.applicationName }
-                .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-        }
+        let recorder = await makeRecorder()
+        let apps = try await recorder.listApplications()
+            .map { $0.applicationName }
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
 
         if apps.isEmpty {
             print("No capturable applications found. You may need to grant Screen Recording permission.")
@@ -44,9 +42,8 @@ struct CLI {
     }
 
     private func record(applicationNamed name: String, outputPath: String?) async throws {
-        let handle = try await MainActor.run {
-            try await recorder.startRecording(appNamed: name, outputPath: outputPath)
-        }
+        let recorder = await makeRecorder()
+        let handle = try await recorder.startRecording(appNamed: name, outputPath: outputPath)
 
         let status = RecordingStatus(appName: handle.appName, outputPath: handle.outputURL.path)
         status.start()
@@ -54,9 +51,7 @@ struct CLI {
         do {
             status.startTimer()
             waitForStopSignal()
-            try await MainActor.run {
-                try await handle.stop()
-            }
+            try await handle.stop()
             status.finish()
         } catch {
             status.fail(error: error)
@@ -81,6 +76,11 @@ struct CLI {
         """
         print(usage)
     }
+}
+
+@MainActor
+private func makeRecorder() -> AppRecorder {
+    AppRecorder()
 }
 
 private func describe(_ error: Error) -> String {
