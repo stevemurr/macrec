@@ -8,9 +8,19 @@ let package = Package(
         .macOS(.v13)
     ],
     products: [
-        .executable(name: "macrec", targets: ["macrec"])
+        .library(name: "MacrecCore", targets: ["MacrecCore"]),
+        .executable(name: "macrec", targets: ["macrec"]),
+        .executable(name: "MacrecUI", targets: ["MacrecUI"])
     ],
     targets: [
-        .executableTarget(name: "macrec")
+        .target(name: "MacrecCore"),
+        .executableTarget(
+            name: "macrec",
+            dependencies: ["MacrecCore"]
+        ),
+        .executableTarget(
+            name: "MacrecUI",
+            dependencies: ["MacrecCore"]
+        )
     ]
 )
