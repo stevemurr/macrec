@@ -121,18 +121,47 @@ private func matchApplication(_ name: String, in applications: [SCRunningApplica
 private func resolvedOutputURL(_ path: String?, fallbackName: String) -> URL {
     let filename = path ?? defaultOutputName(for: fallbackName)
     let url = URL(fileURLWithPath: filename)
+    let resolved: URL
     if url.path.hasPrefix("/") {
-        return url
+        resolved = url
+    } else {
+        resolved = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(filename)
     }
-    return URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(filename)
+    return uniqueURL(startingAt: resolved)
 }
 
 private func defaultOutputName(for appName: String) -> String {
-    let sanitized = appName
+    let sanitized = sanitizedAppName(appName)
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyyMMdd_HHmmss"
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    let timestamp = formatter.string(from: Date())
+    return "\(sanitized.isEmpty ? "output" : sanitized)_\(timestamp).wav"
+}
+
+private func uniqueURL(startingAt url: URL) -> URL {
+    guard FileManager.default.fileExists(atPath: url.path) else { return url }
+    let base = url.deletingPathExtension()
+    let ext = url.pathExtension
+    var attempt = 1
+    while attempt < 10_000 {
+        let candidateName = base.lastPathComponent + "-\(attempt)"
+        let candidate = base.deletingLastPathComponent()
+            .appendingPathComponent(candidateName)
+            .appendingPathExtension(ext)
+        if !FileManager.default.fileExists(atPath: candidate.path) {
+            return candidate
+        }
+        attempt += 1
+    }
+    return url
+}
+
+private func sanitizedAppName(_ name: String) -> String {
+    name
         .components(separatedBy: CharacterSet.alphanumerics.inverted)
         .filter { !$0.isEmpty }
         .joined(separator: "_")
-    return "\(sanitized.isEmpty ? "output" : sanitized).wav"
 }
 
 // MARK: - Audio writer

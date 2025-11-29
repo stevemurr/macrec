@@ -4,95 +4,22 @@ import MacrecCore
 
 @main
 struct MacrecUIApp: App {
-    init() {
-        // Ensure the app is a regular app (shows in Dock and Cmd+Tab).
-        NSApplication.shared.setActivationPolicy(.regular)
-    }
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        WindowGroup {
-            ContentView(viewModel: RecorderViewModel())
-                .frame(minWidth: 340, minHeight: 200)
-                .onAppear {
-                    // Ensure the app becomes active so text inputs receive focus when launched from CLI.
-                    NSApp.activate(ignoringOtherApps: true)
-                }
+        Settings {
+            EmptyView()
         }
     }
 }
 
-struct ContentView: View {
-    @StateObject var viewModel: RecorderViewModel
-    @FocusState private var focusedField: FocusField?
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var statusController: StatusItemController?
 
-    private enum FocusField: Hashable {
-        case output
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("MacrecUI")
-                .font(.headline)
-                .bold()
-
-            Text("App")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            Picker("", selection: $viewModel.selectedApp) {
-                ForEach(viewModel.apps, id: \.self) { app in
-                    Text(app).tag(app)
-                }
-            }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .accessibilityLabel("App")
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            Text("Output")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            TextField("filename.wav", text: $viewModel.outputName)
-                .textFieldStyle(.roundedBorder)
-                .focused($focusedField, equals: .output)
-
-            HStack {
-                Spacer()
-                Button(viewModel.isRecording ? "Stop" : "Record") {
-                    viewModel.toggleRecording()
-                }
-                .keyboardShortcut(.space, modifiers: [])
-                .buttonStyle(.borderedProminent)
-                .tint(viewModel.isRecording ? .red : .accentColor)
-                .disabled(viewModel.selectedApp.isEmpty || viewModel.isBusy)
-            }
-
-            if viewModel.isRecording {
-                Label(viewModel.elapsed, systemImage: "record.circle")
-                    .foregroundStyle(.secondary)
-            } else if !viewModel.statusMessage.isEmpty {
-                Text(viewModel.statusMessage)
-                    .foregroundStyle(.secondary)
-            }
-
-            if let error = viewModel.errorMessage {
-                Text(error)
-                    .foregroundStyle(Color.red)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .frame(minWidth: 320, idealWidth: 340, maxWidth: 440, minHeight: 120, idealHeight: 140)
-        .padding(12)
-        .task {
-            await viewModel.loadApps()
-        }
-        .onAppear {
-            // Bring the app to the front and focus the output field when the window opens.
-            DispatchQueue.main.async {
-                NSApp.activate(ignoringOtherApps: true)
-                NSApp.windows.first?.makeKeyAndOrderFront(nil)
-                focusedField = .output
-            }
-        }
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApplication.shared.setActivationPolicy(.accessory)
+        statusController = StatusItemController()
     }
 }
 
@@ -100,19 +27,22 @@ struct ContentView: View {
 final class RecorderViewModel: ObservableObject {
     @Published var apps: [String] = []
     @Published var selectedApp: String = ""
-    @Published var outputName: String = ""
     @Published var isRecording = false
     @Published var isBusy = false
     @Published var statusMessage = ""
     @Published var errorMessage: String?
     @Published var elapsed = "00:00"
+    @Published var lastSaved: URL?
+    @Published var recents: [RecentRecording] = []
 
     private let recorder = AppRecorder()
     private var handle: RecordingHandle?
     private var timer: Timer?
     private var startDate: Date?
+    private let recentsStore = RecentsStore()
 
-    func loadApps() async {
+    func loadApps(forceRefresh: Bool) async {
+        if !forceRefresh && !apps.isEmpty { return }
         isBusy = true
         defer { isBusy = false }
         do {
@@ -120,9 +50,6 @@ final class RecorderViewModel: ObservableObject {
             self.apps = apps
             if selectedApp.isEmpty {
                 selectedApp = apps.first ?? ""
-            }
-            if outputName.isEmpty, let first = selectedApp.split(separator: ".").first {
-                outputName = "\(first).wav"
             }
             statusMessage = apps.isEmpty ? "No capturable apps found." : ""
         } catch {
@@ -148,7 +75,7 @@ final class RecorderViewModel: ObservableObject {
         errorMessage = nil
         statusMessage = ""
         do {
-            let handle = try await recorder.startRecording(appNamed: selectedApp, outputPath: outputName.isEmpty ? nil : outputName)
+            let handle = try await recorder.startRecording(appNamed: selectedApp, outputPath: nil)
             self.handle = handle
             startTimer()
             isRecording = true
@@ -163,12 +90,16 @@ final class RecorderViewModel: ObservableObject {
         isBusy = true
         defer { isBusy = false }
         do {
+            let duration = startDate.map { Date().timeIntervalSince($0) } ?? 0
             if let handle {
                 try await handle.stop()
             }
             stopTimer()
             if let handle {
-                statusMessage = "Saved to \(handle.outputURL.path)"
+                statusMessage = "Saved recording"
+                lastSaved = handle.outputURL
+                addRecent(appName: handle.appName, url: handle.outputURL, duration: duration)
+                revealInFinder(url: handle.outputURL)
             }
         } catch {
             errorMessage = friendly(error)
@@ -194,6 +125,34 @@ final class RecorderViewModel: ObservableObject {
         timer = nil
         startDate = nil
         elapsed = "00:00"
+    }
+
+    private func addRecent(appName: String, url: URL, duration: TimeInterval) {
+        let entry = RecentRecording(appName: appName, duration: duration, timestamp: Date(), url: url)
+        recents = recentsStore.add(entry)
+    }
+
+    func loadRecents() {
+        recents = recentsStore.load()
+    }
+
+    func revealLastSaved() {
+        guard let url = lastSaved else { return }
+        revealInFinder(url: url)
+    }
+
+    func reveal(url: URL) {
+        revealInFinder(url: url)
+    }
+
+    func copyPath(for url: URL) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(url.path, forType: .string)
+    }
+
+    private func revealInFinder(url: URL) {
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     private func friendly(_ error: Error) -> String {
